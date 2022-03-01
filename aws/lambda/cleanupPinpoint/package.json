@@ -1,0 +1,12 @@
+{
+  "name": "cleanup-pinpoint-module",
+  "type": "module",
+  "description": "Pinpoint cleanup module.",
+  "version": "1.0",
+  "main": "index.js",
+  "author": "Alexander Bittermann",
+  "dependencies": {
+    "@aws-sdk/client-pinpoint": "^3.52.0",
+    "luxon": "^2.3.0"
+  }
+}
