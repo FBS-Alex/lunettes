@@ -1,12 +1,12 @@
 {
-  "name": "seminar-confirmation-module",
+  "name": "lunettes-sms-module",
   "type": "module",
-  "description": "Seminar confirmation module.",
+  "description": "Lunettes SMS module.",
   "version": "1.0",
   "main": "index.js",
   "author": "Alexander Bittermann",
   "dependencies": {
     "@aws-sdk/client-pinpoint": "^3.52.0",
-    "@aws-sdk/client-sns": "^3.52.0"
+    "luxon": "^2.3.0"
   }
 }

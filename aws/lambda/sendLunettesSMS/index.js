@@ -1,13 +1,18 @@
 import {
+    CreateCampaignCommand,
+    CreateSegmentCommand,
+    GetSegmentsCommand,
     PhoneNumberValidateCommand,
     PinpointClient,
     SendMessagesCommand,
-    UpdateCampaignCommand,
-    UpdateEndpointCommand,
-    UpdateSegmentCommand
+    UpdateEndpointCommand
 } from '@aws-sdk/client-pinpoint';
-import crypto from 'crypto';
+import {createHash, parseDateTime} from './util.js';
+import {CampaignConfig} from './campaign_config.js';
+import {DateTime, Settings} from 'luxon';
 
+Settings.defaultZone = 'Japan';
+Settings.defaultLocale = 'ja-JP';
 
 const pinpoint = new PinpointClient({region: process.env.region});
 
@@ -15,27 +20,45 @@ const pinpoint = new PinpointClient({region: process.env.region});
 // See: https://docs.aws.amazon.com/pinpoint/latest/userguide/channels-sms-setup.html
 const projectId = process.env.projectId;
 
-const messageType = "TRANSACTIONAL";
+const MESSAGE_TYPE = "TRANSACTIONAL";
+
+const PAGE_SIZE = 200;
+
+const SEGMENT_UID_TAG = 'uid';
+
+const CAMPAIGN_NAME_MAX_LENGTH = 64;
+const CAMPAIGN_CONFIGS = [
+    new CampaignConfig('lunettes_seminar_reminder_1day', '（1日前）', (dateTime) => dateTime.minus({days: 1})),
+    new CampaignConfig('lunettes_seminar_reminder_1hour', '（1時間前）', (dateTime) => dateTime.minus({hours: 1}))
+];
 
 export const handler = async (event) => {
     console.log('Received event:', event);
-    try {
-        const data = await validateNumber(event.data);
-        if (data.NumberValidateResponse.PhoneTypeCode === 0) {
-            const dateTime = parseDateTime(event.data.dateTime);
-            const segmentName = event.data.itemName + '_' + dateTime.toISOString();
-            const endpointId = await updateEndpoint(data, event.data, segmentName);
-            await sendConfirmation(endpointId, event.data.templateName);
-            if (new Date().addDays(1).getTime() < dateTime.getTime()) {
-                const segmentId = await updateSegment(segmentName);
-                await updateCampaigns(segmentId, segmentName, dateTime);
-            }
-        } else {
-            console.log("Received a phone number that isn't capable of receiving " +
-                "SMS messages. No endpoint created.");
+    const data = await validateNumber(event.data);
+    if (data.NumberValidateResponse.PhoneTypeCode === 0) {
+        const dateTime = parseDateTime(event.data.dateTime);
+        let dateSuffix = '_' + dateTime.toISO(
+            {
+                format: 'basic',
+                suppressMilliseconds: true,
+                suppressSeconds: true,
+                includeOffset: false
+            });
+        // since campaign names have a limit of 64 characters and segment name will be used in the campaign name
+        // we have to calculate max length for the segment name prefix
+        const segmentName = event.data.itemName.substring(0,
+            CAMPAIGN_NAME_MAX_LENGTH - dateSuffix.length - Math.max(
+                ...CAMPAIGN_CONFIGS.map(config => config.nameSuffix.length))) + dateSuffix;
+        const segmentUid = createHash(event.data.itemName + dateSuffix);
+        const endpointId = await updateEndpoint(data, event.data, segmentUid, dateTime);
+        await sendConfirmation(endpointId, event.data.templateName);
+        if (CAMPAIGN_CONFIGS.some(config => config.isApplicable(dateTime)) && !await segmentExists(segmentUid)) {
+            const segmentId = await createSegment(segmentUid, segmentName);
+            await createCampaigns(segmentId, segmentName, dateTime);
         }
-    } catch (e) {
-        console.log(e, e.stack);
+    } else {
+        console.log("Received a phone number that isn't capable of receiving " +
+            "SMS messages. No endpoint created.");
     }
 };
 
@@ -55,9 +78,9 @@ async function validateNumber(eventData) {
     return data;
 }
 
-async function updateEndpoint(data, eventData, source) {
+async function updateEndpoint(data, eventData, source, dateTime) {
     const destinationNumber = data.NumberValidateResponse.CleansedPhoneNumberE164;
-    const endpointId = destinationNumber.substring(1) + '_' + crypto.createHash('sha256', {outputLength: 32}).update(eventData.itemName).digest('hex');
+    const endpointId = destinationNumber.substring(1) + '_' + createHash(eventData.itemName);
 
     const params = {
         ApplicationId: projectId,
@@ -82,6 +105,9 @@ async function updateEndpoint(data, eventData, source) {
                 ],
                 ItemName: [
                     eventData.itemName
+                ],
+                DateTime: [
+                    dateTime.toLocaleString(DateTime.DATETIME_MED)
                 ]
             },
             User: {
@@ -107,7 +133,7 @@ async function sendConfirmation(endpointId, templateName) {
             },
             MessageConfiguration: {
                 SMSMessage: {
-                    MessageType: messageType
+                    MessageType: MESSAGE_TYPE
                 }
             },
             TemplateConfiguration: {
@@ -123,50 +149,68 @@ async function sendConfirmation(endpointId, templateName) {
         data.MessageResponse.EndpointResult[endpointId].StatusMessage);
 }
 
-async function updateSegment(segmentName) {
+async function segmentExists(uid) {
+    let token = undefined;
+    do {
+        const params = {
+            ApplicationId: projectId,
+            PageSize: PAGE_SIZE.toString(),
+            Token: token
+        };
+        const data = await pinpoint.send(new GetSegmentsCommand(params));
+        if (data.SegmentsResponse.Item.some(value => value.tags && value.tags[SEGMENT_UID_TAG] === uid)) {
+            return true;
+        }
+        token = data.SegmentsResponse.NextToken;
+    } while (token);
+    return false;
+}
+
+async function createSegment(segmentUid, segmentName) {
     const params = {
         ApplicationId: projectId,
-        SegmentId: crypto.createHash('sha256', {outputLength: 32}).update(segmentName).digest('hex'),
         WriteSegmentRequest: {
             Dimensions: {
                 Attributes: {
-                    'Source': {
+                    Source: {
                         Values: [
-                            segmentName
+                            segmentUid
                         ],
                         AttributeType: 'INCLUSIVE'
                     }
                 }
             },
-            Name: segmentName
+            Name: segmentName,
+            tags: {
+                [SEGMENT_UID_TAG]: segmentUid
+            }
         }
     };
-    const data = await pinpoint.send(new UpdateSegmentCommand(params));
-    console.log('Segment created/updated');
+    const data = await pinpoint.send(new CreateSegmentCommand(params));
+    console.log('Segment created');
     console.log(data);
     return data.SegmentResponse.Id;
 }
 
-async function updateCampaigns(segmentId, segmentName, dateTime) {
-    await updateCampaign(segmentName + '（1日前のリマインダー）', segmentId, 'lunettes_seminar_reminder_1day', dateTime.addDays(-1));
-    await updateCampaign(segmentName + '（1時間前のリマインダー）', segmentId, 'lunettes_seminar_reminder_1hour', dateTime.addHours(-1));
+async function createCampaigns(segmentId, segmentName, dateTime) {
+    await Promise.all(CAMPAIGN_CONFIGS.filter(config => config.isApplicable(dateTime)).map(
+        async config => createCampaign(segmentName + config.nameSuffix, segmentId, config.template,
+            config.calculateDateTime(dateTime))));
 }
 
-async function updateCampaign(campaignName, segmentId, templateName, dateTime) {
+async function createCampaign(campaignName, segmentId, templateName, dateTime) {
     const params = {
         ApplicationId: projectId,
-        CampaignId: crypto.createHash('sha256', {outputLength: 32}).update(campaignName).digest('hex'),
         WriteCampaignRequest: {
             MessageConfiguration: {
                 SMSMessage: {
-                    MessageType: messageType
+                    MessageType: MESSAGE_TYPE
                 }
             },
             Name: campaignName,
             Schedule: {
-                StartTime: dateTime.toISOString(),
+                StartTime: dateTime.toISO(),
                 Frequency: 'ONCE',
-                IsLocalTime: true,
                 Timezone: 'UTC+09'
             },
             SegmentId: segmentId,
@@ -177,30 +221,7 @@ async function updateCampaign(campaignName, segmentId, templateName, dateTime) {
             }
         }
     };
-    const data = await pinpoint.send(new UpdateCampaignCommand(params));
-    console.log('Campaign created/updated');
+    const data = await pinpoint.send(new CreateCampaignCommand(params));
+    console.log('Campaign created');
     console.log(data);
 }
-
-function parseDateTime(str) {
-    const match = str.match(/(\d+)[月/](\d+)日?（.）(\d+):(\d+)～/);
-    const [, month, day, hour, minute] = match;
-    const now = new Date();
-    let year = now.getFullYear();
-    if (month < now.getMonth() + 1 || (month === now.getMonth() + 1 && day < now.getDate())) {
-        year++;
-    }
-    return new Date(year, month - 1, day, hour, minute);
-}
-
-Date.prototype.addDays = function (days) {
-    const date = new Date(this.valueOf());
-    date.setDate(date.getDate() + days);
-    return date;
-};
-
-Date.prototype.addHours = function (h) {
-    const date = new Date(this.valueOf());
-    date.setTime(this.getTime() + (h * 60 * 60 * 1000));
-    return date;
-};
