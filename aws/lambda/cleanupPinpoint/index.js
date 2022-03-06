@@ -2,10 +2,11 @@ import {
     CampaignStatus,
     DeleteCampaignCommand,
     DeleteSegmentCommand,
+    Frequency,
     GetCampaignsCommand,
     PinpointClient
 } from '@aws-sdk/client-pinpoint';
-import {DateTime, Duration, Settings} from 'luxon';
+import {DateTime, Settings} from 'luxon';
 
 Settings.defaultZone = 'Japan';
 Settings.defaultLocale = 'ja-JP';
@@ -18,7 +19,7 @@ const projectId = process.env.projectId;
 
 const PAGE_SIZE = 200;
 
-const DELETION_INTERVAL = new Duration({months: 1});
+const DELETION_INTERVAL = {months: 1};
 
 export const handler = async (event) => {
     console.log('Received event:', event);
@@ -32,7 +33,7 @@ export const handler = async (event) => {
 
 async function deleteCompletedCampaigns() {
     const deletionThreshold = DateTime.local().minus(DELETION_INTERVAL);
-    let token = null;
+    let token = undefined;
     do {
         const params = {
             ApplicationId: projectId,
@@ -40,13 +41,24 @@ async function deleteCompletedCampaigns() {
             Token: token
         };
         const data = await pinpoint.send(new GetCampaignsCommand(params));
+        const deletedSegments = new Set();
         for (const campaign of data.CampaignsResponse.Item.filter(
             value => [CampaignStatus.DELETED, CampaignStatus.COMPLETED].includes(
-                value.State.CampaignStatus) && DateTime.fromISO(value.LastModifiedDate) < deletionThreshold)) {
+                value.State.CampaignStatus) && value.Schedule && value.Schedule.Frequency === Frequency.ONCE && DateTime.fromISO(
+                value.Schedule.StartTime) < deletionThreshold)) {
+            if (!deletedSegments.has(campaign.SegmentId)) {
+                try {
+                    await pinpoint.send(
+                        new DeleteSegmentCommand({ApplicationId: projectId, SegmentId: campaign.SegmentId}));
+                    console.log('Deleted segment:', campaign.SegmentId);
+                    deletedSegments.add(campaign.SegmentId);
+                } catch (e) {
+                    console.error(e, e.stack);
+                }
+            }
             try {
                 await pinpoint.send(new DeleteCampaignCommand({ApplicationId: projectId, CampaignId: campaign.Id}));
-                await pinpoint.send(
-                    new DeleteSegmentCommand({ApplicationId: projectId, SegmentId: campaign.SegmentId}));
+                console.log('Deleted campaign:', campaign.Name);
             } catch (e) {
                 console.error(e, e.stack);
             }
