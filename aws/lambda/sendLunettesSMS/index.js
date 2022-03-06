@@ -7,7 +7,7 @@ import {
     SendMessagesCommand,
     UpdateEndpointCommand
 } from '@aws-sdk/client-pinpoint';
-import {createHash, parseDateTime} from './util.js';
+import {createHash, parseDateTime, zenkaku2hankaku} from './util.js';
 import {CampaignConfig} from './campaign_config.js';
 import {DateTime, Settings} from 'luxon';
 
@@ -63,7 +63,7 @@ export const handler = async (event) => {
 };
 
 async function validateNumber(eventData) {
-    let destinationNumber = eventData.phoneNumber;
+    let destinationNumber = zenkaku2hankaku(eventData.phoneNumber.replace(/[-\/ー／]/g, ''));
     if (destinationNumber.length === 11) {
         destinationNumber = "+81" + destinationNumber;
     }
@@ -80,7 +80,8 @@ async function validateNumber(eventData) {
 
 async function updateEndpoint(data, eventData, source, dateTime) {
     const destinationNumber = data.NumberValidateResponse.CleansedPhoneNumberE164;
-    const endpointId = destinationNumber.substring(1) + '_' + createHash(eventData.itemName);
+    const userId = destinationNumber.substring(1);
+    const endpointId = userId + '_' + source;
 
     const params = {
         ApplicationId: projectId,
@@ -115,7 +116,8 @@ async function updateEndpoint(data, eventData, source, dateTime) {
                     Name: [
                         eventData.name
                     ]
-                }
+                },
+                UserId: userId
             }
         }
     };
