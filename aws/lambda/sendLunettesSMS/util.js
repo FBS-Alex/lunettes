@@ -2,8 +2,7 @@ import {DateTime} from "luxon";
 import crypto from "crypto";
 
 export function parseDateTime(str) {
-    const match = str.match(/(\d+)[月/](\d+)日?（.）(\d+):(\d+)～/);
-    const [, month, day, hour, minute] = match;
+    const [month, day, hour, minute] = str.match(/\d+/g);
     const now = DateTime.local();
     let year = now.year;
     if (month < now.month || (month === now.month && day < now.day)) {
